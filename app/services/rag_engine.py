@@ -1,9 +1,9 @@
 import time
+import asyncio
 from typing import List, Dict, Any, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 import logging
-
 from app.core.config import settings
 from app.infra.db.chroma_client import chroma_client
 from app.infra.db.neo4j_client import neo4j_client
@@ -24,33 +24,41 @@ class RAGEngine:
         start_time = time.time()
         
         try:
-            # Step 1: Retrieve from both sources
-            vector_results = await self._retrieve_from_vector_store(
-                request.question, 
-                request.max_results,
-                request.scene
+            # Step 1: Retrieve from both sources IN PARALLEL
+            retrieval_start = time.time()
+            vector_results, graph_results = await asyncio.gather(
+                self._retrieve_from_vector_store(
+                    request.question, 
+                    request.max_results,
+                    request.scene
+                ),
+                self._retrieve_from_knowledge_graph(
+                    request.question,
+                    request.max_results
+                )
             )
-            
-            graph_results = await self._retrieve_from_knowledge_graph(
-                request.question,
-                request.max_results
-            )
+            retrieval_time = time.time() - retrieval_start
+            logger.info(f"Parallel retrieval completed in {retrieval_time:.3f}s (vector: {vector_results['count']}, graph: {graph_results['count']})")
             
             # Step 2: Combine and rank results
             combined_context = self._combine_contexts(vector_results, graph_results)
             
             # Step 3: Generate response using LLM
+            llm_start = time.time()
             answer = await self._generate_answer(
                 request.question,
                 combined_context,
                 request.query_type
             )
+            llm_time = time.time() - llm_start
+            logger.info(f"LLM generation completed in {llm_time:.3f}s")
             
             # Step 4: Calculate confidence and prepare sources
             confidence = self._calculate_confidence(vector_results, graph_results)
             sources = self._prepare_sources(vector_results, graph_results)
             
             processing_time = time.time() - start_time
+            logger.info(f"Total RAG processing time: {processing_time:.3f}s")
             
             return QueryResponse(
                 answer=answer,
@@ -76,9 +84,12 @@ class RAGEngine:
             if scene:
                 where_clause = {"subject": scene}
             
+            # Optimization: Cap retrieval to avoid overfetching since we only use top 3
+            optimized_results = min(max_results, 5)
+            
             results = await chroma_client.search_similar(
                 query_text=query,
-                n_results=max_results,
+                n_results=optimized_results,
                 where=where_clause
             )
             
@@ -103,8 +114,11 @@ class RAGEngine:
             if not neo4j_client.driver:
                 logger.warning("Neo4j driver not available, skipping graph retrieval")
                 return {"type": "graph", "results": [], "count": 0}
-                
-            facts = await neo4j_client.get_structured_facts(query, max_results)
+            
+            # Optimization: Cap retrieval since we only use top 3
+            optimized_results = min(max_results, 5)
+            
+            facts = await neo4j_client.get_structured_facts(query, optimized_results)
             
             return {
                 "type": "graph",
