@@ -12,6 +12,7 @@ class QueryRequest(BaseModel):
     query_type: QueryType = QueryType.GENERAL
     context: Optional[Dict[str, Any]] = None
     scene: Optional[str] = None # CHANGE THIS LINE
+    subject_filter: Optional[str] = None
     max_results: int = Field(default=5, ge=1, le=20)
     
 class QueryResponse(BaseModel):

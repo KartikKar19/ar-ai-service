@@ -1,7 +1,7 @@
 import time
 from typing import List, Dict, Any, Optional
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 import logging
 
 from app.core.config import settings
@@ -99,6 +99,11 @@ class RAGEngine:
     ) -> Dict[str, Any]:
         """Retrieve structured facts from Neo4j"""
         try:
+            # Check if Neo4j driver is available
+            if not neo4j_client.driver:
+                logger.warning("Neo4j driver not available, skipping graph retrieval")
+                return {"type": "graph", "results": [], "count": 0}
+                
             facts = await neo4j_client.get_structured_facts(query, max_results)
             
             return {

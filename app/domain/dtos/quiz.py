@@ -27,7 +27,7 @@ class QuizQuestion(BaseModel):
 
 class QuizGenerationRequest(BaseModel):
     user_interactions: List[Dict[str, Any]] = Field(default_factory=list)
-    scene: Optional[str] = None # CHANGE THIS LINE
+    subject: Optional[str] = None  # Changed from scene to subject
     difficulty: QuizDifficulty = QuizDifficulty.MEDIUM
     question_count: int = Field(default=5, ge=1, le=20)
     question_types: List[QuestionType] = Field(default_factory=lambda: [QuestionType.MULTIPLE_CHOICE])

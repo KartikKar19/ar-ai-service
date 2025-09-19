@@ -3,7 +3,7 @@ import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 import logging
 
 from app.core.config import settings
@@ -12,6 +12,8 @@ from app.domain.dtos.quiz import (
     QuizDifficulty, QuizAttempt, QuizSubmissionRequest, QuizResultResponse
 )
 from app.infra.repositories.quiz_repository import QuizRepository
+from app.services.rag_engine import rag_engine
+from app.infra.db.chroma_client import chroma_client
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,7 @@ class QuizService:
             # Generate questions using LLM
             questions = await self._generate_questions(
                 focus_areas=focus_areas,
-                subject=request.scene,
+                subject=request.subject,
                 difficulty=request.difficulty,
                 question_count=request.question_count,
                 question_types=request.question_types
@@ -104,9 +106,38 @@ class QuizService:
         question_count: int,
         question_types: List[QuestionType]
     ) -> List[QuizQuestion]:
-        """Generate quiz questions using LLM"""
+        """Generate quiz questions using LLM with RAG context"""
         
-        # Prepare context for LLM
+        # Step 1: Retrieve relevant content from documents using RAG
+        relevant_content = ""
+        if subject:
+            try:
+                # Search for relevant content in the document store
+                search_results = await chroma_client.search_similar(
+                    query_text=f"Generate questions about {subject}",
+                    n_results=5,
+                    where={"subject": subject} if subject else None
+                )
+                
+                # Extract content from search results
+                if search_results and search_results.get("documents"):
+                    documents = search_results["documents"]
+                    metadatas = search_results.get("metadatas", [])
+                    
+                    content_parts = []
+                    for i, doc in enumerate(documents[:3]):  # Top 3 results
+                        metadata = metadatas[i] if i < len(metadatas) else {}
+                        doc_id = metadata.get("document_id", f"doc_{i}")
+                        content_parts.append(f"[Document {doc_id}]: {doc}")
+                    
+                    relevant_content = "\n".join(content_parts)
+                    logger.info(f"Retrieved {len(documents)} relevant documents for quiz generation")
+                
+            except Exception as e:
+                logger.warning(f"Failed to retrieve RAG content: {e}")
+                relevant_content = ""
+        
+        # Step 2: Prepare context for LLM including RAG content
         context = f"""
         Subject: {subject or 'General'}
         Difficulty: {difficulty.value}
@@ -117,27 +148,42 @@ class QuizService:
         - Main topics: {list(focus_areas['topics'].keys())[:3]}
         - Weak areas: {focus_areas['weak_areas'][:3]}
         - Strong areas: {focus_areas['strong_areas'][:3]}
+        
+        RELEVANT COURSE CONTENT:
+        {relevant_content}
         """
         
         system_prompt = """You are an expert educational assessment creator.
 Generate quiz questions that are:
-1. Educationally valuable and aligned with learning objectives
-2. Appropriate for the specified difficulty level
-3. Focused on the user's learning areas and gaps
-4. Varied in format to maintain engagement
+1. Based on the provided course content and materials
+2. Educationally valuable and aligned with learning objectives
+3. Appropriate for the specified difficulty level
+4. Focused on the user's learning areas and gaps
+5. Varied in format to maintain engagement
 
-Return your response as a valid JSON array of question objects with this structure:
-{
-    "id": "unique_id",
-    "question": "question text",
-    "question_type": "multiple_choice|true_false|short_answer",
-    "options": ["option1", "option2", "option3", "option4"] (for multiple choice only),
-    "correct_answer": "correct answer",
-    "explanation": "explanation of the correct answer",
-    "difficulty": "easy|medium|hard",
-    "subject": "subject area",
-    "tags": ["tag1", "tag2"]
-}
+IMPORTANT: 
+- Use the RELEVANT COURSE CONTENT provided to create questions that test understanding of the actual material
+- If no course content is provided, create general questions about the subject
+- Return ONLY a valid JSON array of question objects
+- Do not include any other text, explanations, or formatting
+
+The JSON structure must be exactly:
+[
+    {
+        "id": "unique_id",
+        "question": "question text based on course content",
+        "question_type": "multiple_choice",
+        "options": ["option1", "option2", "option3", "option4"],
+        "correct_answer": "option1",
+        "explanation": "explanation referencing the course material",
+        "difficulty": "easy",
+        "subject": "subject area",
+        "tags": ["tag1", "tag2"]
+    }
+]
+
+Valid question_type values: "multiple_choice", "true_false", "short_answer"
+Valid difficulty values: "easy", "medium", "hard"
 """
         
         messages = [
@@ -147,32 +193,75 @@ Generate {question_count} quiz questions based on this context:
 
 {context}
 
-Focus on creating questions that help reinforce learning in weak areas while building on strong areas.
-Make sure questions are clear, unambiguous, and educationally valuable.
+Requirements:
+- Create questions that test understanding of the course content provided
+- Focus on creating questions that help reinforce learning in weak areas while building on strong areas
+- Make sure questions are clear, unambiguous, and educationally valuable
+- Base questions on the actual content from the documents when available
+- If no specific content is provided, create general questions about {subject or 'the topic'}
 """)
         ]
         
         try:
             response = await self.llm.ainvoke(messages)
-            questions_data = json.loads(response.content)
+            response_content = response.content.strip()
+            
+            # Try to extract JSON from the response
+            # Sometimes LLM adds extra text before/after JSON
+            json_start = response_content.find('[')
+            json_end = response_content.rfind(']') + 1
+            
+            if json_start == -1 or json_end == 0:
+                # No JSON array found, try to find JSON object
+                json_start = response_content.find('{')
+                json_end = response_content.rfind('}') + 1
+                if json_start != -1 and json_end > 0:
+                    json_content = response_content[json_start:json_end]
+                    # Wrap single object in array
+                    json_content = f"[{json_content}]"
+                else:
+                    raise ValueError("No valid JSON found in response")
+            else:
+                json_content = response_content[json_start:json_end]
+            
+            logger.info(f"Extracted JSON content: {json_content[:200]}...")
+            questions_data = json.loads(json_content)
+            
+            # Ensure it's a list
+            if not isinstance(questions_data, list):
+                questions_data = [questions_data]
             
             questions = []
             for i, q_data in enumerate(questions_data[:question_count]):
-                question = QuizQuestion(
-                    id=q_data.get("id", str(uuid.uuid4())),
-                    question=q_data["question"],
-                    question_type=QuestionType(q_data["question_type"]),
-                    options=q_data.get("options"),
-                    correct_answer=q_data["correct_answer"],
-                    explanation=q_data["explanation"],
-                    difficulty=QuizDifficulty(q_data.get("difficulty", difficulty.value)),
-                    subject=q_data.get("subject", subject or "general"),
-                    tags=q_data.get("tags", [])
-                )
-                questions.append(question)
+                try:
+                    question = QuizQuestion(
+                        id=q_data.get("id", str(uuid.uuid4())),
+                        question=q_data["question"],
+                        question_type=QuestionType(q_data["question_type"]),
+                        options=q_data.get("options"),
+                        correct_answer=q_data["correct_answer"],
+                        explanation=q_data["explanation"],
+                        difficulty=QuizDifficulty(q_data.get("difficulty", difficulty.value)),
+                        subject=q_data.get("subject", subject or "general"),
+                        tags=q_data.get("tags", [])
+                    )
+                    questions.append(question)
+                except Exception as e:
+                    logger.warning(f"Skipping malformed question {i}: {e}")
+                    continue
+            
+            if not questions:
+                # If no valid questions were parsed, use fallback
+                logger.warning("No valid questions parsed from LLM response, using fallback")
+                return self._create_fallback_questions(subject, difficulty, question_count)
             
             return questions
             
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            logger.error(f"Response content: {response.content}")
+            # Fallback: create simple questions
+            return self._create_fallback_questions(subject, difficulty, question_count)
         except Exception as e:
             logger.error(f"Error generating questions with LLM: {e}")
             # Fallback: create simple questions
@@ -187,17 +276,65 @@ Make sure questions are clear, unambiguous, and educationally valuable.
         """Create fallback questions if LLM generation fails"""
         questions = []
         
+        # Create subject-specific sample questions
+        subject_lower = (subject or "general").lower()
+        
+        sample_questions = {
+            "mathematics": [
+                {
+                    "question": "What is 2 + 2?",
+                    "options": ["3", "4", "5", "6"],
+                    "correct_answer": "4",
+                    "explanation": "2 + 2 equals 4 by basic arithmetic."
+                },
+                {
+                    "question": "What is the square root of 16?",
+                    "options": ["2", "3", "4", "5"],
+                    "correct_answer": "4",
+                    "explanation": "The square root of 16 is 4 because 4 × 4 = 16."
+                }
+            ],
+            "science": [
+                {
+                    "question": "What is the chemical symbol for water?",
+                    "options": ["H2O", "CO2", "NaCl", "O2"],
+                    "correct_answer": "H2O",
+                    "explanation": "Water is composed of two hydrogen atoms and one oxygen atom."
+                },
+                {
+                    "question": "What planet is closest to the Sun?",
+                    "options": ["Venus", "Earth", "Mercury", "Mars"],
+                    "correct_answer": "Mercury",
+                    "explanation": "Mercury is the closest planet to the Sun in our solar system."
+                }
+            ]
+        }
+        
+        # Get appropriate questions for the subject
+        if subject_lower in sample_questions:
+            available_questions = sample_questions[subject_lower]
+        else:
+            available_questions = [
+                {
+                    "question": f"What is a key concept in {subject or 'this field'}?",
+                    "options": ["Concept A", "Concept B", "Concept C", "Concept D"],
+                    "correct_answer": "Concept A",
+                    "explanation": f"This is a fundamental concept in {subject or 'this field'}."
+                }
+            ]
+        
         for i in range(count):
+            question_data = available_questions[i % len(available_questions)]
             question = QuizQuestion(
                 id=str(uuid.uuid4()),
-                question=f"Sample question {i+1} about {subject or 'general topic'}",
+                question=question_data["question"],
                 question_type=QuestionType.MULTIPLE_CHOICE,
-                options=["Option A", "Option B", "Option C", "Option D"],
-                correct_answer="Option A",
-                explanation="This is a sample explanation.",
+                options=question_data["options"],
+                correct_answer=question_data["correct_answer"],
+                explanation=question_data["explanation"],
                 difficulty=difficulty,
                 subject=subject or "general",
-                tags=["sample"]
+                tags=["fallback", subject_lower]
             )
             questions.append(question)
         

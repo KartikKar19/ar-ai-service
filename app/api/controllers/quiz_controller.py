@@ -9,6 +9,28 @@ from app.infra.repositories.quiz_repository import QuizRepository
 
 router = APIRouter()
  
+@router.post("", response_model=QuizOut, dependencies=[Depends(verify_api_key)])
+async def generate_quiz_simple(
+    request: QuizGenerationRequest,
+    quiz_repo: QuizRepository = Depends(QuizRepository.dep)
+):
+    """Generate an adaptive quiz - simplified endpoint"""
+    try:
+        # If no interactions provided, get recent interactions from database
+        if not request.user_interactions:
+            request.user_interactions = await quiz_repo.get_user_interactions(
+                limit=50,
+                subject=request.subject
+            )
+        
+        quiz = await quiz_service.generate_adaptive_quiz(
+            request,
+            user_id="test-user",  # Replace with actual auth later
+            quiz_repo=quiz_repo
+        )
+        return quiz
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating quiz: {str(e)}")
 
 @router.post("/generate", response_model=QuizOut, dependencies=[Depends(verify_api_key)])
 async def generate_quiz(
@@ -59,7 +81,7 @@ async def submit_quiz(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error submitting quiz: {str(e)}")
 
-@router.get("/", response_model=List[QuizOut], dependencies=[Depends(verify_api_key)])
+@router.get("/all", response_model=List[QuizOut], dependencies=[Depends(verify_api_key)])
 async def get_user_quizzes(
     quiz_repo: QuizRepository = Depends(QuizRepository.dep)
 ):

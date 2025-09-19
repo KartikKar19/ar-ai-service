@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
+# Disable ChromaDB telemetry to prevent capture() errors
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY_ANONYMOUS"] = "False"
+
 from app.api.router import api_router
 from app.core.logging import configure_logging
 from app.core.config import settings
@@ -35,7 +39,14 @@ def create_app() -> FastAPI:
         # Initialize databases
         await init_client()
         await chroma_client.connect()
-        await neo4j_client.connect()
+        
+        # Try to connect to Neo4j, but don't fail if it's not available
+        try:
+            await neo4j_client.connect()
+            print("✅ Neo4j connected successfully")
+        except Exception as e:
+            print(f"⚠️  Neo4j connection failed: {e}")
+            print("   Continuing without Neo4j support...")
         
         # Create upload directory
         os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

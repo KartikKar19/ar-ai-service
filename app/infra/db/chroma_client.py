@@ -1,8 +1,13 @@
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+from chromadb.utils import embedding_functions
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
 import logging
+import os
+
+# Disable ChromaDB telemetry to avoid capture() errors
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +15,11 @@ class ChromaClient:
     def __init__(self):
         self.client = None
         self.collection = None
+        # Create OpenAI embedding function with the correct model
+        self.embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+            api_key=settings.OPENAI_API_KEY,
+            model_name=settings.EMBEDDING_MODEL
+        )
     
     async def connect(self):
         """Initialize ChromaDB client asynchronously"""
@@ -23,10 +33,24 @@ class ChromaClient:
                     allow_reset=True
                 )
             )
-            collection = client.get_or_create_collection(
+            
+            # Always reset collection to ensure correct embedding function
+            try:
+                # Try to delete existing collection
+                client.delete_collection("documents")
+                logger.info("Deleted existing documents collection")
+            except ValueError:
+                # Collection doesn't exist, which is fine
+                logger.info("No existing collection to delete")
+            
+            # Create new collection with correct embedding function
+            collection = client.create_collection(
                 name="documents",
-                metadata={"description": "AR-Learn document embeddings"}
+                metadata={"description": "AR-Learn document embeddings"},
+                embedding_function=self.embedding_function
             )
+            logger.info("Created new documents collection with OpenAI embeddings")
+            
             return client, collection
         self.client, self.collection = await loop.run_in_executor(None, sync_connect)
         logger.info("Connected to ChromaDB (async)")
@@ -105,6 +129,29 @@ class ChromaClient:
         except Exception as e:
             logger.error(f"Error getting ChromaDB stats: {e}")
             return {"total_documents": 0, "collection_name": "unknown"}
+    
+    async def reset_collection(self):
+        """Reset the collection with correct embedding function"""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        def sync_reset():
+            # Delete existing collection
+            try:
+                self.client.delete_collection("documents")
+                logger.info("Deleted existing documents collection")
+            except ValueError:
+                logger.info("No existing collection to delete")
+            
+            # Create new collection with correct embedding function
+            collection = self.client.create_collection(
+                name="documents",
+                metadata={"description": "AR-Learn document embeddings"},
+                embedding_function=self.embedding_function
+            )
+            logger.info("Created new documents collection with OpenAI embeddings")
+            return collection
+        
+        self.collection = await loop.run_in_executor(None, sync_reset)
 
 # Global client instance
 chroma_client = ChromaClient()
