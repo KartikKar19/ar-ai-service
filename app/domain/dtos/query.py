@@ -14,6 +14,9 @@ class QueryRequest(BaseModel):
     scene: Optional[str] = None # CHANGE THIS LINE
     subject_filter: Optional[str] = None
     max_results: int = Field(default=5, ge=1, le=20)
+    # TTS options
+    include_audio: bool = Field(default=False, description="Whether to include TTS audio in response")
+    voice: Optional[str] = Field(default="alloy", description="TTS voice: alloy, echo, fable, onyx, nova, shimmer")
     
 class QueryResponse(BaseModel):
     answer: str
@@ -21,6 +24,10 @@ class QueryResponse(BaseModel):
     sources: List[Dict[str, Any]]
     query_type: QueryType
     processing_time: float
+    # TTS fields
+    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio (MP3)")
+    audio_duration: Optional[float] = Field(default=None, description="Audio duration in seconds (estimated)")
+    voice_used: Optional[str] = Field(default=None, description="TTS voice used for audio generation")
 
 class ConversationMessage(BaseModel):
     role: str  # "user" or "assistant"

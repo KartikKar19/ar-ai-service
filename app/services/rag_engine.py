@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.infra.db.chroma_client import chroma_client
 from app.infra.db.neo4j_client import neo4j_client
 from app.domain.dtos.query import QueryRequest, QueryResponse, QueryType
+from app.services.tts_service import tts_service
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,28 @@ class RAGEngine:
             confidence = self._calculate_confidence(vector_results, graph_results)
             sources = self._prepare_sources(vector_results, graph_results)
             
+            # Step 5: Generate TTS audio if requested
+            audio_base64 = None
+            audio_duration = None
+            voice_used = None
+            
+            if request.include_audio:
+                tts_start = time.time()
+                voice_used = request.voice or "alloy"
+                audio_base64 = await tts_service.generate_speech(
+                    text=answer,
+                    voice=voice_used
+                )
+                tts_time = time.time() - tts_start
+                
+                if audio_base64:
+                    # Estimate duration (rough calculation: ~150 words per minute, ~5 chars per word)
+                    estimated_words = len(answer) / 5
+                    audio_duration = (estimated_words / 150) * 60  # Convert to seconds
+                    logger.info(f"TTS generation completed in {tts_time:.3f}s (estimated duration: {audio_duration:.1f}s)")
+                else:
+                    logger.warning("TTS generation failed")
+            
             processing_time = time.time() - start_time
             logger.info(f"Total RAG processing time: {processing_time:.3f}s")
             
@@ -65,7 +88,10 @@ class RAGEngine:
                 confidence=confidence,
                 sources=sources,
                 query_type=request.query_type,
-                processing_time=processing_time
+                processing_time=processing_time,
+                audio_base64=audio_base64,
+                audio_duration=audio_duration,
+                voice_used=voice_used
             )
             
         except Exception as e:

@@ -8,7 +8,7 @@ from app.core.api_key_auth import verify_api_key
 from app.infra.repositories.quiz_repository import QuizRepository
 
 router = APIRouter()
- 
+
 @router.post("", response_model=QuizOut, dependencies=[Depends(verify_api_key)])
 async def generate_quiz_simple(
     request: QuizGenerationRequest,
